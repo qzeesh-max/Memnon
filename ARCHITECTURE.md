@@ -1,3 +1,5 @@
+![Logo](images/boost_shm_logo.jpg)
+
 # N-CRIT Trie & Segment Management Architecture
 
 This document visualizes the lock-free N-CRIT Radix Trie and its interaction with multiple threads and the segmented memory manager. It is designed to quickly map virtual addresses to sub-segments without relying on OS-level locks.

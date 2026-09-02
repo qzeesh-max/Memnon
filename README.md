@@ -1,4 +1,6 @@
-# Boost Interprocess Growing Memory Segment
+![Logo](images/boost_shm_logo.jpg)
+
+# BoostInterprocessGrowingMemorySegment
 
 This project provides a robust, scalable, lock-free approach to managing segmented, growable shared memory in C++, designed as a modern enhancement over Boost.Interprocess's standard managed shared memory.
 
