@@ -1,4 +1,4 @@
-![Logo](images/boost_shm_logo.jpg)
+![Logo](images/memnon_logo.jpg)
 
 # N-CRIT Trie & Segment Management Architecture
 
