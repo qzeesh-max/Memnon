@@ -37,27 +37,21 @@ This project provides a robust, scalable, lock-free approach to managing segment
 
 ### Build Instructions
 ```sh
-mkdir build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j
+./build.sh
 ```
 
 ### Running Tests
 The project features a comprehensive test suite covering basic memory allocations, recursive growths, multi-threading with contention, cross-manager bounds checking, and multi-process lazy discovery.
 
 ```sh
-cd build
-make test
+./run_tests.sh
 ```
 
 ### Running Benchmarks
 Google Benchmark is automatically fetched via `FetchContent` in CMake.
 
 ```sh
-cd build
-make benchmarks
-./benchmarks/benchmarks
+./run_benchmarks.sh
 ```
 
 Benchmarks evaluate:
@@ -78,7 +72,7 @@ We directly benchmarked `segmented_managed_memory` with `segmented_offset_ptr` a
 A script is provided to automatically compile and run the full test suite under AddressSanitizer (ASAN), UndefinedBehaviorSanitizer (UBSAN), and ThreadSanitizer (TSAN) to guarantee memory correctness and data-race freedom.
 
 ```sh
-./tests/test_sanitizers.sh
+./run_sanitizers.sh
 ```
 
 ## Architecture Layout
