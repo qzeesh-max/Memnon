@@ -30,10 +30,14 @@ This project provides a robust, scalable, lock-free approach to managing segment
 
 ## Building and Testing
 
-### Prerequisites
-- CMake 3.10+
-- Boost C++ Libraries
-- A C++17 compatible compiler
+### Prerequisites / Dependencies
+- **CMake 3.10+**: For configuring and building the project.
+- **A C++17 compatible compiler**: Such as GCC, Clang, or Apple Clang.
+- **Boost C++ Libraries**: Used for the internal intrusive free-lists, robust named object tracking, and interprocess synchronization primitives.
+- **Google Benchmark**: Used for the performance benchmark suite (automatically fetched via CMake's `FetchContent`).
+- **Google Test (GTest)**: Used for the correctness test suite (automatically fetched via CMake's `FetchContent`).
+
+*For full licensing details of the third-party dependencies, please see the `CREDITS.md` file.*
 
 ### Build Instructions
 ```sh
