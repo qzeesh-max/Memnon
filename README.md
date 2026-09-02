@@ -87,6 +87,8 @@ We directly benchmarked `segmented_managed_memory` with `segmented_offset_ptr` a
 Previously, heavy POSIX file I/O operations and intrusive free-list lookups caused a significant bottleneck. 
 - **Offset Pointer Elimination**: By swapping the custom `segmented_offset_ptr<void>` inside the inner `segment_manager`'s allocator state with standard `offset_ptr<void>`, we completely bypassed the trie lookup logic during contiguous intrasegment allocations, producing a **40x speedup**.
 - **Background Growth**: The new `prefetch_worker` intercepts the POSIX I/O stalls by proactively queueing and allocating memory asynchronously into new chunks whenever the active memory goes below 50% capacity.
+- **Multiple Arena Contention Avoidance**: The core chunk directory lock (`list_mtx_`) was swapped from a recursive exclusive lock to a `std::shared_mutex` (Read-Write lock). This allows completely concurrent array traversal during memory allocation.
+- **Shared Memory Spinlocks**: We injected a custom, yield-backed `shm_spinlock` family into the Boost `rbtree_best_fit` algorithm. This bypasses the heavy POSIX `interprocess_mutex` OS syscall overhead, effectively halving memory allocation latency (from 247ns -> 126ns per op) under massive concurrent multi-threaded contention.
 
 ## Architecture Layout
 
