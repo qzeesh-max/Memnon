@@ -64,6 +64,7 @@
 #include "segment_registry.hpp"
 #include "segmented_offset_ptr.hpp"
 #include "segmented_allocator.hpp"
+#include "prefetch_worker.hpp"
 
 namespace segmented_interprocess {
 
@@ -74,7 +75,7 @@ namespace segmented_interprocess {
 // as the void_pointer so that ALL internal free-list and rbtree node pointers
 // use our encoding and can be correctly resolved after segment growth.
 
-using si_void_ptr    = segmented_offset_ptr<void>;
+using si_void_ptr    = boost::interprocess::offset_ptr<void>;
 using si_mutex_fam   = boost::interprocess::mutex_family;
 using si_alloc_algo  = boost::interprocess::rbtree_best_fit<si_mutex_fam, si_void_ptr>;
 using si_seg_mgr     = boost::interprocess::segment_manager<
@@ -108,6 +109,7 @@ public:
         add_segment_anon(
             std::max(initial_size, kMinSegmentSize),
             /*is_primary=*/true);
+        prefetch_worker::instance().register_manager(this);
     }
 
     // -----------------------------------------------------------------------
@@ -118,21 +120,18 @@ public:
                               bool creator = true)
         : anon_(false), shm_root_name_(root_name)
     {
-        std::cout << "[mgr] root_name=" << root_name << " creator=" << creator << "\n" << std::flush;
         if (creator) {
-            std::cout << "[mgr] calling add_segment_shm\n" << std::flush;
             add_segment_shm(0, std::max(initial_size, kMinSegmentSize),
                             /*is_primary=*/true, /*is_creator=*/true);
-            std::cout << "[mgr] calling init_segment_table\n" << std::flush;
             init_segment_table();
-            std::cout << "[mgr] init_segment_table done\n" << std::flush;
         } else {
-            std::cout << "[mgr] calling open_all_segments\n" << std::flush;
             open_all_segments();
         }
+        prefetch_worker::instance().register_manager(this);
     }
 
     ~segmented_segment_manager() {
+        prefetch_worker::instance().unregister_manager(this);
         // Destroy segment_managers before munmapping
         std::lock_guard<std::recursive_mutex> lk(list_mtx_);
         for (auto& info : segments_) {
@@ -153,10 +152,14 @@ public:
     /// Allocate `bytes` contiguous bytes from any sub-segment.
     /// Grows if no sub-segment has sufficient free space.
     void* allocate(size_type bytes) {
-        std::lock_guard<std::recursive_mutex> lk(list_mtx_);
-        void* p = try_allocate_locked(bytes);
+        void* p = nullptr;
+        {
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            p = try_allocate_locked(bytes);
+        }
         if (!p) [[unlikely]] {
-            grow_locked(bytes + kMinSegmentSize);
+            grow(bytes + kMinSegmentSize);
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
             p = try_allocate_locked(bytes);
         }
         if (!p) [[unlikely]]
@@ -167,10 +170,14 @@ public:
     /// Allocate without throwing; returns nullptr on failure.
     void* allocate(size_type bytes, std::nothrow_t) noexcept {
         try {
-            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
-            void* p = try_allocate_locked(bytes);
+            void* p = nullptr;
+            {
+                std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+                p = try_allocate_locked(bytes);
+            }
             if (!p) [[unlikely]] {
-                grow_locked(bytes + kMinSegmentSize);
+                grow(bytes + kMinSegmentSize);
+                std::lock_guard<std::recursive_mutex> lk(list_mtx_);
                 p = try_allocate_locked(bytes);
             }
             return p;
@@ -205,22 +212,25 @@ public:
     /// Returns nullptr if a named object with this name already exists.
     template<class T, class... Args>
     T* construct(const char* name, Args&&... args) {
-        std::lock_guard<std::recursive_mutex> lk(list_mtx_);
-        
-        // Try to construct in existing segments
-        for (auto& info : segments_) {
-            try {
-                T* ptr = info.smgr->construct<T>(name)(std::forward<Args>(args)...);
-                if (ptr) return ptr;
-            } catch (const boost::interprocess::bad_alloc&) {
-                // Not enough memory in this sub-segment, try next
-                continue;
+        {
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            
+            // Try to construct in existing segments
+            for (auto& info : segments_) {
+                try {
+                    T* ptr = info.smgr->construct<T>(name)(std::forward<Args>(args)...);
+                    if (ptr) return ptr;
+                } catch (const boost::interprocess::bad_alloc&) {
+                    // Not enough memory in this sub-segment, try next
+                    continue;
+                }
             }
         }
         
         // If we reach here, we need to grow
-        grow_locked(sizeof(T) + 1024); // Add some padding for the named object metadata
+        grow(sizeof(T) + 1024); // Add some padding for the named object metadata
         
+        std::lock_guard<std::recursive_mutex> lk2(list_mtx_);
         // Try the newly added segment (which is the last one)
         try {
             return segments_.back().smgr->construct<T>(name)(std::forward<Args>(args)...);
@@ -259,6 +269,17 @@ public:
     // -----------------------------------------------------------------------
 
     /// Total free bytes across all sub-segments.
+        size_type get_free_memory_unlocked() const noexcept {
+        size_type total = 0;
+        for (const auto& info : segments_) total += info.smgr->get_free_memory();
+        return total;
+    }
+    size_type get_size_unlocked() const noexcept {
+        size_type total = 0;
+        for (const auto& info : segments_) total += info.seg->size;
+        return total;
+    }
+
     size_type get_free_memory() const {
         std::lock_guard<std::recursive_mutex> lk(list_mtx_);
         size_type total = 0;
@@ -285,10 +306,63 @@ public:
     // -----------------------------------------------------------------------
     // Explicit grow
     // -----------------------------------------------------------------------
-    void grow(size_type additional_bytes) {
-        std::lock_guard<std::recursive_mutex> lk(list_mtx_);
-        grow_locked(additional_bytes);
+    void grow(size_type min_bytes) {
+        std::lock_guard<std::mutex> glk(grow_mtx_);
+        size_type new_chunk_size = 0;
+        size_type current_file_size = 0;
+        {
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            if (get_free_memory_unlocked() >= min_bytes) return;
+            new_chunk_size = std::max(min_bytes,
+                segments_.empty() ? kDefaultSegSize
+                                  : segments_.back().seg->size * kGrowMultiplier);
+            new_chunk_size = detail::align_up(new_chunk_size, detail::page_size());
+            current_file_size = get_size_unlocked();
+        }
+        if (anon_) {
+            auto seg = sub_segment::create_anon(new_chunk_size);
+            if (!seg) throw std::bad_alloc();
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            add_segment_anon_preallocated(std::move(seg), false);
+        } else {
+            std::size_t new_file_size = current_file_size + new_chunk_size;
+            if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) {
+                throw std::bad_alloc();
+            }
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            add_segment_shm(current_file_size, new_chunk_size, false, false);
+            update_segment_table();
+        }
     }
+
+    void grow_background() noexcept {
+        if (anon_) return;
+        std::unique_lock<std::mutex> glk(grow_mtx_, std::try_to_lock);
+        if (!glk.owns_lock()) return;
+
+        size_type new_chunk_size = 0;
+        size_type current_file_size = 0;
+        {
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            if (segments_.empty()) return;
+            auto& last_seg = segments_.back();
+            if (last_seg.smgr->get_free_memory() >= (last_seg.seg->size / 2)) return;
+            new_chunk_size = std::max(kMinSegmentSize, last_seg.seg->size * kGrowMultiplier);
+            new_chunk_size = detail::align_up(new_chunk_size, detail::page_size());
+            current_file_size = get_size_unlocked();
+        }
+        std::size_t new_file_size = current_file_size + new_chunk_size;
+        if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) return;
+        {
+            std::lock_guard<std::recursive_mutex> lk(list_mtx_);
+            if (current_file_size == get_size_unlocked()) {
+                add_segment_shm(current_file_size, new_chunk_size, false, false);
+                update_segment_table();
+            }
+        }
+    }
+
+    friend class prefetch_worker;
 
 private:
     // -----------------------------------------------------------------------
@@ -304,39 +378,29 @@ private:
     // -----------------------------------------------------------------------
 
     void* try_allocate_locked(size_type bytes) noexcept {
+        void* p = nullptr;
         for (auto& info : segments_) {
-            void* p = info.smgr->allocate(bytes, std::nothrow_t{});
-            if (p) [[likely]] return p;
+            p = info.smgr->allocate(bytes, std::nothrow_t{});
+            if (p) [[likely]] break;
         }
-        return nullptr;
-    }
-
-    void grow_locked(size_type min_bytes) {
-        // Pick a size: at least min_bytes, at most kGrowMultiplier × current
-        size_type new_chunk_size = std::max(min_bytes,
-            segments_.empty() ? kDefaultSegSize
-                              : segments_.back().seg->size * kGrowMultiplier);
-        new_chunk_size = detail::align_up(new_chunk_size, detail::page_size());
-
-        if (anon_) {
-            add_segment_anon(new_chunk_size, /*is_primary=*/false);
-        } else {
-            // Determine current file size
-            std::size_t current_file_size = get_size(); // sum of all sizes
-            std::size_t new_file_size = current_file_size + new_chunk_size;
-            if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) {
-                throw std::bad_alloc();
+        if (p) {
+            auto& last_seg = segments_.back();
+            if (last_seg.smgr->get_free_memory() < (last_seg.seg->size / 2)) {
+                prefetch_worker::instance().hint_growth(this);
             }
-
-            add_segment_shm(current_file_size, new_chunk_size,
-                            /*is_primary=*/false, /*is_creator=*/false);
-            update_segment_table();
         }
+        return p;
     }
+
+
 
     void add_segment_anon(size_type size, bool is_primary) {
         auto seg = sub_segment::create_anon(size);
         if (!seg) throw std::bad_alloc();
+        add_segment_anon_preallocated(std::move(seg), is_primary);
+    }
+    void add_segment_anon_preallocated(std::unique_ptr<sub_segment> seg, bool is_primary) {
+        size_type size = seg->size;
         seg->is_primary = is_primary;
 
         // Register BEFORE constructing segment_manager so that the
@@ -366,14 +430,12 @@ private:
 
     void add_segment_shm(size_type file_offset, size_type size,
                           bool is_primary, bool is_creator) {
-        std::cout << "[mgr] add_segment_shm offset=" << file_offset << " size=" << size << "\n" << std::flush;
         std::unique_ptr<sub_segment> seg;
         if (is_creator) {
             seg = sub_segment::create_shm(shm_root_name_.c_str(), size);
         } else {
             seg = sub_segment::open_shm_chunk(shm_root_name_.c_str(), size, file_offset);
         }
-        std::cout << "[mgr] seg mapped at " << seg->base_vaddr << "\n" << std::flush;
         if (!seg) throw std::runtime_error(
             "segmented_segment_manager: failed to map SHM chunk");
         seg->is_primary = is_primary;
@@ -561,6 +623,7 @@ public:
     // -----------------------------------------------------------------------
     bool                   anon_;
     std::string            shm_root_name_;
+    std::mutex grow_mtx_;
     mutable std::recursive_mutex list_mtx_;
     std::vector<seg_info>  segments_;
 
@@ -570,7 +633,83 @@ public:
 
 } // namespace segmented_interprocess
 
+
+namespace segmented_interprocess {
+inline void prefetch_worker::register_manager(segmented_segment_manager* mgr) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (active_managers_++ == 0) {
+        stop_.store(false, std::memory_order_release);
+        thread_ = std::thread(&prefetch_worker::worker_loop, this);
+    }
+}
+inline void prefetch_worker::unregister_manager(segmented_segment_manager* mgr) {
+    {
+        std::lock_guard<detail::spinlock> lk(queue_lock_);
+        std::queue<segmented_segment_manager*> new_q;
+        while (!queue_.empty()) {
+            auto* m = queue_.front();
+            queue_.pop();
+            if (m != mgr) new_q.push(m);
+        }
+        queue_ = std::move(new_q);
+    }
+    while (working_on_.load(std::memory_order_acquire) == mgr) {
+        std::this_thread::yield();
+    }
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (--active_managers_ == 0) {
+        stop_.store(true, std::memory_order_release);
+        cv_.notify_one();
+        if (thread_.joinable()) thread_.join();
+    }
+}
+inline void prefetch_worker::hint_growth(segmented_segment_manager* mgr) {
+    {
+        std::lock_guard<detail::spinlock> lk(queue_lock_);
+        if (!queue_.empty() && queue_.back() == mgr) return;
+        queue_.push(mgr);
+    }
+    cv_.notify_one();
+}
+inline void prefetch_worker::worker_loop() {
+    while (true) {
+        segmented_segment_manager* mgr_to_grow = nullptr;
+        {
+            std::lock_guard<detail::spinlock> lk(queue_lock_);
+            if (!queue_.empty()) {
+                mgr_to_grow = queue_.front();
+                queue_.pop();
+                working_on_.store(mgr_to_grow, std::memory_order_release);
+            }
+        }
+        if (mgr_to_grow) {
+            mgr_to_grow->grow_background();
+            working_on_.store(nullptr, std::memory_order_release);
+            continue;
+        }
+        std::unique_lock<std::mutex> slk(sleep_mtx_);
+        cv_.wait(slk, [this]() {
+            bool has_work = false;
+            {
+                std::lock_guard<detail::spinlock> lk(queue_lock_);
+                has_work = !queue_.empty();
+            }
+            return stop_.load(std::memory_order_acquire) || has_work;
+        });
+        if (stop_.load(std::memory_order_acquire)) {
+            bool has_work = false;
+            {
+                std::lock_guard<detail::spinlock> lk(queue_lock_);
+                has_work = !queue_.empty();
+            }
+            if (!has_work) break;
+        }
+    }
+}
+} // namespace segmented_interprocess
+
 // Signal that segmented_segment_manager is now fully defined so that
 // segmented_allocator.hpp can compile the method bodies.
 #define SEGMENTED_SEGMENT_MANAGER_DEFINED
-#include "segmented_allocator.hpp"  // re-include to pick up the impl block
+#include "segmented_allocator.hpp"
+#include "prefetch_worker.hpp"  // re-include to pick up the impl block

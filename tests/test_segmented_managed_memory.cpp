@@ -38,6 +38,35 @@
 
 using namespace segmented_interprocess;
 
+
+#include <thread>
+#include <chrono>
+
+// ============================================================================
+// Test 9: background prefetch worker
+// ============================================================================
+static void test_background_prefetch() {
+    segmented_managed_memory mem(kDefaultSegSize);
+
+    std::size_t initial_segs = mem.segment_count();
+    CHECK_EQ(initial_segs, std::size_t(1));
+
+    // Allocate slightly more than 50% to trigger the background prefetch
+    std::size_t alloc_size = (kDefaultSegSize / 2) + 1024 * 1024;
+    void* p = mem.allocate(alloc_size);
+    CHECK_NONNULL(p);
+
+    // Sleep briefly to allow the background worker thread to execute
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::size_t segs_after = mem.segment_count();
+    CHECK(segs_after > initial_segs);
+
+    mem.deallocate(p);
+
+    std::printf("PASS: test_background_prefetch (asynchronously pre-allocated segment)\n");
+}
+
 // ============================================================================
 // Utility
 // ============================================================================
@@ -278,6 +307,35 @@ static void test_raw_alloc_stress() {
     std::printf("PASS: test_raw_alloc_stress (%d allocs)\n", kN);
 }
 
+
+#include <thread>
+#include <chrono>
+
+// ============================================================================
+// Test 9: background prefetch worker
+// ============================================================================
+static void test_background_prefetch() {
+    segmented_managed_memory mem(kDefaultSegSize);
+
+    std::size_t initial_segs = mem.segment_count();
+    CHECK_EQ(initial_segs, std::size_t(1));
+
+    // Allocate slightly more than 50% to trigger the background prefetch
+    std::size_t alloc_size = (kDefaultSegSize / 2) + 1024 * 1024;
+    void* p = mem.allocate(alloc_size);
+    CHECK_NONNULL(p);
+
+    // Sleep briefly to allow the background worker thread to execute
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::size_t segs_after = mem.segment_count();
+    CHECK(segs_after > initial_segs);
+
+    mem.deallocate(p);
+
+    std::printf("PASS: test_background_prefetch (asynchronously pre-allocated segment)\n");
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -292,6 +350,7 @@ int main() {
     test_multiple_named_objects();
     test_allocator_interface();
     test_raw_alloc_stress();
+    test_background_prefetch();
 
     std::printf("=== ALL segmented_managed_memory tests PASSED ===\n");
     return 0;
