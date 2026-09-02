@@ -12,3 +12,5 @@ add_si_test(test_segmented_offset_ptr)
 add_si_test(test_segmented_managed_memory)
 add_si_test(test_multithreaded)
 add_si_test(test_shm_multithreaded)
+
+add_si_test(test_persistence)
