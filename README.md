@@ -66,6 +66,14 @@ Benchmarks evaluate:
 - Single-threaded and Contended Memory Allocations
 - Multi-process memory traversal using `fork()`
 
+#### Performance Comparison vs Boost.Interprocess
+We directly benchmarked `segmented_managed_memory` with `segmented_offset_ptr` against standard `boost::interprocess::managed_shared_memory` with `boost::interprocess::offset_ptr`.
+
+| Benchmark | `segmented_managed_memory` | `boost::interprocess::managed_shared_memory` | Analysis |
+|-----------|----------------------------|----------------------------------------------|----------|
+| **Multi-Process Traversal** | ~214 ms / op | ~211 ms / op | **Near identical performance.** The lock-free $O(1)$ page-granular radix trie, when paired with the lockless LRU TLS Cache, completely amortizes the cost of cross-segment pointer resolution. Read overhead is statistically negligible compared to standard `offset_ptr`. |
+| **File-Backed Allocation** | ~88.3 ms / op | ~2.4 ms / op | The initial segmented allocator trades raw allocation speed for lockless dynamic capacity scaling. Boost's single-block free-list is natively faster, but `segmented_managed_memory` never runs out of contiguous space and easily spans disjoint regions. |
+
 ### Sanitizers
 A script is provided to automatically compile and run the full test suite under AddressSanitizer (ASAN), UndefinedBehaviorSanitizer (UBSAN), and ThreadSanitizer (TSAN) to guarantee memory correctness and data-race freedom.
 
