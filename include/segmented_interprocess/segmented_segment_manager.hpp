@@ -1,3 +1,18 @@
+// Copyright (C) 2026 Zeeshan Qazi
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 /// \file segmented_segment_manager.hpp
 /// Multi-segment memory manager: routes allocations across sub-segments and
 /// grows automatically by adding new sub-segments when exhausted.
@@ -140,11 +155,11 @@ public:
     void* allocate(size_type bytes) {
         std::lock_guard<std::recursive_mutex> lk(list_mtx_);
         void* p = try_allocate_locked(bytes);
-        if (!p) {
+        if (!p) [[unlikely]] {
             grow_locked(bytes + kMinSegmentSize);
             p = try_allocate_locked(bytes);
         }
-        if (!p)
+        if (!p) [[unlikely]]
             throw std::bad_alloc();
         return p;
     }
@@ -154,7 +169,7 @@ public:
         try {
             std::lock_guard<std::recursive_mutex> lk(list_mtx_);
             void* p = try_allocate_locked(bytes);
-            if (!p) {
+            if (!p) [[unlikely]] {
                 grow_locked(bytes + kMinSegmentSize);
                 p = try_allocate_locked(bytes);
             }
@@ -165,16 +180,16 @@ public:
     /// Deallocate a pointer obtained from allocate().
     /// Uses the trie to find the owning sub-segment.
     void deallocate(void* ptr) noexcept {
-        if (!ptr) return;
+        if (!ptr) [[unlikely]] return;
         sub_segment* seg =
             segment_registry::instance().find(
                 detail::ptr_to_vaddr(ptr));
-        if (!seg) {
+        if (!seg) [[unlikely]] {
             assert(false && "deallocate: pointer not in any sub-segment");
             return;
         }
         segment_manager* smgr = smgr_for(seg);
-        if (smgr)
+        if (smgr) [[likely]]
             smgr->deallocate(ptr);
     }
 
@@ -291,7 +306,7 @@ private:
     void* try_allocate_locked(size_type bytes) noexcept {
         for (auto& info : segments_) {
             void* p = info.smgr->allocate(bytes, std::nothrow_t{});
-            if (p) return p;
+            if (p) [[likely]] return p;
         }
         return nullptr;
     }

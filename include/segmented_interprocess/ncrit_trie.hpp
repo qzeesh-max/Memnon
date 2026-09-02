@@ -1,3 +1,18 @@
+// Copyright (C) 2026 Zeeshan Qazi
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 /// \file ncrit_trie.hpp
 /// Lock-free n-Crit Radix Trie for virtual-address → sub_segment* mapping.
 ///
@@ -155,12 +170,12 @@ public:
         // Retrieve an entry and move it to the front if found
         tls_entry* hit(uintptr_t addr, uintptr_t expected_tag) {
             for (unsigned i = 0; i < kSize; ++i) {
-                if (addr >= entries[i].base && addr < entries[i].end) {
+                if (addr >= entries[i].base && addr < entries[i].end) [[likely]] {
                     // Lockless passive eviction check:
                     // Verify the leaf slot still contains the segment pointer.
                     // If remove_range was called, it zeroed this slot.
-                    if (entries[i].leaf && entries[i].leaf->load(std::memory_order_acquire) == expected_tag) {
-                        if (i > 0) {
+                    if (entries[i].leaf && entries[i].leaf->load(std::memory_order_acquire) == expected_tag) [[likely]] {
+                        if (i > 0) [[unlikely]] {
                             // Move to front (LRU)
                             tls_entry temp = entries[i];
                             for (unsigned j = i; j > 0; --j) {
@@ -169,7 +184,7 @@ public:
                             entries[0] = temp;
                         }
                         return &entries[0];
-                    } else {
+                    } else [[unlikely]] {
                         // Stale entry: segment was unmapped. Evict it.
                         for (unsigned j = i; j < kSize - 1; ++j) {
                             entries[j] = entries[j + 1];
@@ -260,16 +275,16 @@ private:
         tls_cache_t& cache = tls_cache_();
         for (unsigned i = 0; i < tls_cache_t::kSize; ++i) {
             tls_entry& entry = cache.entries[i];
-            if (addr >= entry.base && addr < entry.end) {
+            if (addr >= entry.base && addr < entry.end) [[likely]] {
                 uintptr_t expected_tag = reinterpret_cast<uintptr_t>(entry.seg) | kLeafTag;
-                if (entry.leaf && entry.leaf->load(std::memory_order_acquire) == expected_tag) {
-                    if (i > 0) {
+                if (entry.leaf && entry.leaf->load(std::memory_order_acquire) == expected_tag) [[likely]] {
+                    if (i > 0) [[unlikely]] {
                         tls_entry temp = entry;
                         for (unsigned j = i; j > 0; --j) cache.entries[j] = cache.entries[j - 1];
                         cache.entries[0] = temp;
                     }
                     return cache.entries[0].seg;
-                } else {
+                } else [[unlikely]] {
                     for (unsigned j = i; j < tls_cache_t::kSize - 1; ++j) cache.entries[j] = cache.entries[j + 1];
                     cache.entries[tls_cache_t::kSize - 1] = {};
                     return nullptr; // Was stale, evicted. Must fall back to full traversal.
@@ -283,7 +298,7 @@ private:
         Value v = lookup_page_with_slot(addr >> ps, &leaf_slot);
 
         // Update cache
-        if (v != nullptr) {
+        if (v != nullptr) [[likely]] {
             uintptr_t base = (addr >> ps) << ps;
             uintptr_t end  = base + (uintptr_t(1) << ps);
             cache.insert(base, end, v, leaf_slot);
@@ -328,14 +343,14 @@ public:
         for (unsigned d = 0; d < Levels - 1u; ++d) {
             const unsigned idx  = level_idx(page_num, d);
             const uintptr_t raw = cur->ch[idx].load(std::memory_order_acquire);
-            if (raw == 0) return nullptr;
+            if (raw == 0) [[unlikely]] return nullptr;
             cur = reinterpret_cast<const node_t*>(raw);
         }
         const unsigned idx = level_idx(page_num, Levels - 1u);
         const std::atomic<uintptr_t>& leaf_ref = cur->ch[idx];
         const uintptr_t raw = leaf_ref.load(std::memory_order_acquire);
-        if (raw == 0) return nullptr;
-        if (out_leaf_slot) *out_leaf_slot = const_cast<std::atomic<uintptr_t>*>(&leaf_ref);
+        if (raw == 0) [[unlikely]] return nullptr;
+        if (out_leaf_slot) [[likely]] *out_leaf_slot = const_cast<std::atomic<uintptr_t>*>(&leaf_ref);
         return reinterpret_cast<Value>(raw & ~kLeafTag);
     }
 

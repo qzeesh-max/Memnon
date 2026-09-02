@@ -1,3 +1,18 @@
+// Copyright (C) 2026 Zeeshan Qazi
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as
+// published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 /// \file segmented_offset_ptr.hpp
 /// Drop-in replacement for boost::interprocess::offset_ptr that supports
 /// multiple non-contiguous mapped sub-segments.
@@ -234,16 +249,16 @@ public:
 
     /// Resolve the stored offset to a raw pointer.
     pointer get() const noexcept {
-        if (m_offset == kNull) return nullptr;
+        if (m_offset == kNull) [[unlikely]] return nullptr;
 
         const uintptr_t self  = detail::ptr_to_vaddr(this);
         sub_segment*    self_seg   = segment_registry::instance().find(self);
 
-        if (!self_seg) {
+        if (!self_seg) [[unlikely]] {
             // Case A: `this` is on stack/unmanaged heap
             return reinterpret_cast<pointer>(
                 self + static_cast<DifferenceType>(m_offset));
-        } else if (self_seg->is_anon) {
+        } else if (self_seg->is_anon) [[unlikely]] {
             // Case B: anonymous memory
             return reinterpret_cast<pointer>(
                 reinterpret_cast<uintptr_t>(self_seg->base_vaddr) + m_offset);
@@ -254,14 +269,14 @@ public:
         std::size_t target_file_offset = self_file_offset + m_offset;
 
         sub_segment* target_seg = self_seg->find_by_file_offset_fn(self_seg->manager, target_file_offset);
-        if (!target_seg) {
+        if (!target_seg) [[unlikely]] {
             // Lazy discovery
-            if (self_seg->discover_growth_fn && self_seg->discover_growth_fn(self_seg->manager, target_file_offset)) {
+            if (self_seg->discover_growth_fn && self_seg->discover_growth_fn(self_seg->manager, target_file_offset)) [[likely]] {
                 target_seg = self_seg->find_by_file_offset_fn(self_seg->manager, target_file_offset);
             }
         }
 
-        if (!target_seg) {
+        if (!target_seg) [[unlikely]] {
             // If it's STILL not found, the pointer is corrupted or we couldn't map the growth.
             // We can't throw std::runtime_error from a noexcept function.
             // However, get() is marked noexcept! 
@@ -395,7 +410,7 @@ private:
     // set() — encode a raw pointer into m_offset
     // -----------------------------------------------------------------------
     void set(pointer ptr) {
-        if (!ptr) { m_offset = kNull; return; }
+        if (!ptr) [[unlikely]] { m_offset = kNull; return; }
         // TRACE
         // std::cout << "set() called with ptr=" << ptr << "\n" << std::flush;
 
@@ -408,21 +423,21 @@ private:
         sub_segment* target_seg = segment_registry::instance().find(pointee);
         // std::cout << "target_seg=" << target_seg << "\n" << std::flush;
 
-        if (!self_seg) {
+        if (!self_seg) [[unlikely]] {
             // Case A: `this` is on stack/unmanaged heap
             m_offset = static_cast<OffsetType>(
                 static_cast<DifferenceType>(pointee) -
                 static_cast<DifferenceType>(self));
-        } else if (self_seg->is_anon) {
+        } else if (self_seg->is_anon) [[unlikely]] {
             // Case B: anonymous memory
             m_offset = static_cast<OffsetType>(
                 pointee - reinterpret_cast<uintptr_t>(self_seg->base_vaddr));
-        } else {
+        } else [[likely]] {
             // Case C: Shared memory
-            if (!target_seg) {
+            if (!target_seg) [[unlikely]] {
                 throw std::runtime_error("segmented_offset_ptr in managed SHM cannot point to unmanaged memory");
             }
-            if (target_seg->manager != self_seg->manager) {
+            if (target_seg->manager != self_seg->manager) [[unlikely]] {
                 throw std::runtime_error("segmented_offset_ptr cannot point across different segmented_segment_managers");
             }
             
