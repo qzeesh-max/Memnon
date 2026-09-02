@@ -80,7 +80,125 @@ static void BM_SegMgr_MultiThread_Alloc_Anon(benchmark::State& state) {
 BENCHMARK(BM_SegMgr_MultiThread_Alloc_Anon)->Threads(1)->Threads(2)->Threads(4)->Threads(8);
 
 // ---------------------------------------------------------------------------
-// 3. Multi-Process Traversal (fork + exec equivalent via fork)
+// 3. Allocation and Deallocation (Mixed Workload)
+// ---------------------------------------------------------------------------
+static void BM_SegMgr_AllocDealloc(benchmark::State& state) {
+    segmented_segment_manager mgr;
+    std::vector<void*> ptrs;
+    ptrs.reserve(1000);
+    for (auto _ : state) {
+        for (int i = 0; i < 1000; ++i) {
+            ptrs.push_back(mgr.allocate(64));
+        }
+        for (void* p : ptrs) {
+            mgr.deallocate(p);
+        }
+        ptrs.clear();
+    }
+}
+BENCHMARK(BM_SegMgr_AllocDealloc);
+
+static void BM_Boost_AllocDealloc(benchmark::State& state) {
+    for (auto _ : state) {
+        state.PauseTiming();
+        boost::interprocess::shared_memory_object::remove("bench_boost_alloc_dealloc");
+        boost::interprocess::managed_shared_memory mgr(boost::interprocess::create_only, "bench_boost_alloc_dealloc", 1024 * 1024);
+        state.ResumeTiming();
+
+        std::vector<void*> ptrs;
+        ptrs.reserve(1000);
+        for (int i = 0; i < 1000; ++i) {
+            ptrs.push_back(mgr.allocate(64));
+        }
+        for (void* p : ptrs) {
+            mgr.deallocate(p);
+        }
+    }
+    boost::interprocess::shared_memory_object::remove("bench_boost_alloc_dealloc");
+}
+BENCHMARK(BM_Boost_AllocDealloc);
+
+// ---------------------------------------------------------------------------
+// 4. Multi-Threaded Traversal
+// ---------------------------------------------------------------------------
+static segmented_managed_memory* g_seg_mgr_traversal = nullptr;
+static segmented_offset_ptr<Node>* g_seg_mgr_root = nullptr;
+
+static void SetupSegMgrTraversal() {
+    boost::interprocess::shared_memory_object::remove("bench_seg_traversal");
+    g_seg_mgr_traversal = new segmented_managed_memory("bench_seg_traversal", create_only, 1024 * 1024);
+    g_seg_mgr_root = g_seg_mgr_traversal->construct<segmented_offset_ptr<Node>>("Root", nullptr);
+    Node* curr = g_seg_mgr_traversal->construct<Node>("Node0", 0);
+    *g_seg_mgr_root = curr;
+
+    for (int i = 1; i < 5000; ++i) {
+        void* mem = g_seg_mgr_traversal->allocate(sizeof(Node));
+        Node* next = new(mem) Node(i);
+        curr->next = next;
+        curr = next;
+    }
+}
+
+static void TeardownSegMgrTraversal() {
+    delete g_seg_mgr_traversal;
+    boost::interprocess::shared_memory_object::remove("bench_seg_traversal");
+}
+
+static void BM_SegMgr_MultiThread_Traversal(benchmark::State& state) {
+    if (state.thread_index() == 0) SetupSegMgrTraversal();
+    
+    for (auto _ : state) {
+        Node* c = g_seg_mgr_root->get();
+        while (c != nullptr) {
+            benchmark::DoNotOptimize(c->value);
+            c = c->next.get();
+        }
+    }
+    
+    if (state.thread_index() == 0) TeardownSegMgrTraversal();
+}
+BENCHMARK(BM_SegMgr_MultiThread_Traversal)->Threads(1)->Threads(2)->Threads(4)->Threads(8);
+
+static boost::interprocess::managed_shared_memory* g_boost_mgr_traversal = nullptr;
+static boost::interprocess::offset_ptr<BoostNode>* g_boost_mgr_root = nullptr;
+
+static void SetupBoostTraversal() {
+    boost::interprocess::shared_memory_object::remove("bench_boost_traversal");
+    g_boost_mgr_traversal = new boost::interprocess::managed_shared_memory(boost::interprocess::create_only, "bench_boost_traversal", 1024 * 1024);
+    g_boost_mgr_root = g_boost_mgr_traversal->construct<boost::interprocess::offset_ptr<BoostNode>>("Root")(nullptr);
+    BoostNode* curr = g_boost_mgr_traversal->construct<BoostNode>("Node0")(0);
+    *g_boost_mgr_root = curr;
+
+    for (int i = 1; i < 5000; ++i) {
+        void* mem = g_boost_mgr_traversal->allocate(sizeof(BoostNode));
+        BoostNode* next = new(mem) BoostNode(i);
+        curr->next = next;
+        curr = next;
+    }
+}
+
+static void TeardownBoostTraversal() {
+    delete g_boost_mgr_traversal;
+    boost::interprocess::shared_memory_object::remove("bench_boost_traversal");
+}
+
+static void BM_Boost_MultiThread_Traversal(benchmark::State& state) {
+    if (state.thread_index() == 0) SetupBoostTraversal();
+    
+    for (auto _ : state) {
+        BoostNode* c = g_boost_mgr_root->get();
+        while (c != nullptr) {
+            benchmark::DoNotOptimize(c->value);
+            c = c->next.get();
+        }
+    }
+    
+    if (state.thread_index() == 0) TeardownBoostTraversal();
+}
+BENCHMARK(BM_Boost_MultiThread_Traversal)->Threads(1)->Threads(2)->Threads(4)->Threads(8);
+
+// ---------------------------------------------------------------------------
+// 5. Multi-Process Traversal (fork + exec equivalent via fork)
 // ---------------------------------------------------------------------------
 static void BM_SegMgr_MultiProcess_Traversal(benchmark::State& state) {
     for (auto _ : state) {
