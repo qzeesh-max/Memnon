@@ -1,0 +1,7 @@
+build/
+build_*/
+*.txt
+!CMakeLists.txt
+*.py
+scratch/
+.DS_Store
