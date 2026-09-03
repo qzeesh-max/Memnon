@@ -288,20 +288,34 @@ inline void shm_close(void* base, std::size_t size) noexcept {
 
 #else
 
+#ifdef __APPLE__
+inline std::string get_platform_shm_path(const char* name) {
+    std::string s = "/tmp/memnon_shm_";
+    if (name[0] == '/') s += (name + 1);
+    else s += name;
+    return s;
+}
+#define PLATFORM_SHM_OPEN(name, oflag, mode) ::open(get_platform_shm_path(name).c_str(), oflag, mode)
+#define PLATFORM_SHM_UNLINK(name) ::unlink(get_platform_shm_path(name).c_str())
+#else
+#define PLATFORM_SHM_OPEN(name, oflag, mode) ::shm_open(name, oflag, mode)
+#define PLATFORM_SHM_UNLINK(name) ::shm_unlink(name)
+#endif
+
 /// Create a new named SHM object of `size` bytes and mmap it.
 /// The name must start with '/'.  On success, *out_fd is the open fd (caller
 /// must close it after mmap; we do so inside this function).
 /// Returns the mapped base address, or nullptr on error.
 inline void* shm_create(const char* name, std::size_t size) noexcept {
     // Unlink any stale SHM from a previous run
-    ::shm_unlink(name);  // ignore error
+    PLATFORM_SHM_UNLINK(name);  // ignore error
 
-    int fd = ::shm_open(name, O_CREAT | O_RDWR | O_EXCL, 0600);
+    int fd = PLATFORM_SHM_OPEN(name, O_CREAT | O_RDWR | O_EXCL, 0600);
     if (fd < 0) return nullptr;
 
     if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
         ::close(fd);
-        ::shm_unlink(name);
+        PLATFORM_SHM_UNLINK(name);
         return nullptr;
     }
 
@@ -312,7 +326,7 @@ inline void* shm_create(const char* name, std::size_t size) noexcept {
     ::close(fd);
 
     if (p == MAP_FAILED) {
-        ::shm_unlink(name);
+        PLATFORM_SHM_UNLINK(name);
         return nullptr;
     }
     return p;
@@ -321,7 +335,7 @@ inline void* shm_create(const char* name, std::size_t size) noexcept {
 /// Open an existing named SHM object of `size` bytes and mmap it.
 /// Returns the mapped base address, or nullptr on error.
 inline void* shm_open_existing(const char* name, std::size_t size) noexcept {
-    int fd = ::shm_open(name, O_RDWR, 0600);
+    int fd = PLATFORM_SHM_OPEN(name, O_RDWR, 0600);
     if (fd < 0) return nullptr;
 
     void* p = ::mmap(nullptr, size,
@@ -335,7 +349,7 @@ inline void* shm_open_existing(const char* name, std::size_t size) noexcept {
 
 /// Map a specific chunk of an existing named SHM object.
 inline void* shm_map_chunk(const char* name, std::size_t size, std::size_t file_offset) noexcept {
-    int fd = ::shm_open(name, O_RDWR, 0600);
+    int fd = PLATFORM_SHM_OPEN(name, O_RDWR, 0600);
     if (fd < 0) return nullptr;
 
     void* p = ::mmap(nullptr, size,
@@ -349,7 +363,7 @@ inline void* shm_map_chunk(const char* name, std::size_t size, std::size_t file_
 
 /// Retrieve the actual OS file size of a named SHM object.
 inline std::size_t shm_get_size(const char* name) noexcept {
-    int fd = ::shm_open(name, O_RDONLY, 0600);
+    int fd = PLATFORM_SHM_OPEN(name, O_RDONLY, 0600);
     if (fd < 0) return 0;
     struct stat st;
     if (::fstat(fd, &st) != 0) {
@@ -362,9 +376,12 @@ inline std::size_t shm_get_size(const char* name) noexcept {
 
 /// Grow an existing named SHM object to a new total size.
 inline bool shm_grow(const char* name, std::size_t new_size) noexcept {
-    int fd = ::shm_open(name, O_RDWR, 0600);
+    int fd = PLATFORM_SHM_OPEN(name, O_RDWR, 0600);
     if (fd < 0) return false;
     bool ok = (::ftruncate(fd, static_cast<off_t>(new_size)) == 0);
+    if (!ok) {
+        std::printf("shm_grow: ftruncate failed with errno = %d\n", errno);
+    }
     ::close(fd);
     return ok;
 }
@@ -372,11 +389,11 @@ inline bool shm_grow(const char* name, std::size_t new_size) noexcept {
 /// Unmap and unlink a named SHM region.
 inline void shm_destroy(void* base, std::size_t size, const char* name) noexcept {
     if (base && base != MAP_FAILED) ::munmap(base, size);
-    if (name && name[0] != '\0')    ::shm_unlink(name);
+    if (name && name[0] != '\0')    PLATFORM_SHM_UNLINK(name);
 }
 
 inline void shm_remove(const char* name) noexcept {
-    if (name && name[0] != '\0')    ::shm_unlink(name);
+    if (name && name[0] != '\0')    PLATFORM_SHM_UNLINK(name);
 }
 
 /// Unmap a named SHM region (without unlinking — for processes that just

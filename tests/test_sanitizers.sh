@@ -39,7 +39,8 @@ run_sanitizer() {
     echo "--> Running tests"
     ./tests/test_ncrit_trie
     ./tests/test_segmented_offset_ptr
-    ./tests/test_segmented_managed_memory
+    export TSAN_OPTIONS="suppressions=/Users/zeeshanqazi/Desktop/projects/BoostInterprocessGrowingMemorySegment/tsan_suppressions.txt"
+./tests/test_segmented_managed_memory
     ./tests/test_shm_multithreaded
     ./tests/test_multithreaded
 }

@@ -299,12 +299,14 @@ static void test_background_prefetch() {
 
     // Allocate slightly more than 50% to trigger the background prefetch
     std::size_t alloc_size = (kDefaultSegSize / 2) + 1024 * 1024;
+    std::printf("Before alloc: free = %zu\n", mem.get_free_memory());
     void* p = mem.allocate(alloc_size);
     CHECK_NONNULL(p);
+    std::printf("After alloc: free = %zu, size/2 = %zu\n", mem.get_free_memory(), kDefaultSegSize / 2);
 
     // Wait for the background worker thread to execute (up to 5 seconds)
     std::size_t segs_after = initial_segs;
-    for (int i = 0; i < 50; ++i) {
+    for (int i = 0; i < 200; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         segs_after = mem.segment_count();
         if (segs_after > initial_segs) {

@@ -135,7 +135,7 @@ public:
     ~segmented_segment_manager() {
         prefetch_worker::instance().unregister_manager(this);
         // Destroy segment_managers before munmapping
-        std::unique_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         for (auto& info : segments_) {
             if (info.smgr)
                 info.smgr->~segment_manager(); // explicit dtor, no dealloc
@@ -156,12 +156,12 @@ public:
     void* allocate(size_type bytes) {
         void* p = nullptr;
         {
-            std::shared_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             p = try_allocate_locked(bytes);
         }
         if (!p) [[unlikely]] {
             grow(bytes + kMinSegmentSize);
-            std::shared_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             p = try_allocate_locked(bytes);
         }
         if (!p) [[unlikely]]
@@ -174,12 +174,12 @@ public:
         try {
             void* p = nullptr;
             {
-                std::shared_lock<std::shared_mutex> lk(list_mtx_);
+                std::unique_lock<std::mutex> lk(list_mtx_);
                 p = try_allocate_locked(bytes);
             }
             if (!p) [[unlikely]] {
                 grow(bytes + kMinSegmentSize);
-                std::shared_lock<std::shared_mutex> lk(list_mtx_);
+                std::unique_lock<std::mutex> lk(list_mtx_);
                 p = try_allocate_locked(bytes);
             }
             return p;
@@ -215,7 +215,7 @@ public:
     template<class T, class... Args>
     T* construct(const char* name, Args&&... args) {
         {
-            std::shared_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             
             // Try to construct in existing segments
             for (auto& info : segments_) {
@@ -232,7 +232,7 @@ public:
         // If we reach here, we need to grow
         grow(sizeof(T) + 1024); // Add some padding for the named object metadata
         
-        std::shared_lock<std::shared_mutex> lk2(list_mtx_);
+        std::unique_lock<std::mutex> lk2(list_mtx_);
         // Try the newly added segment (which is the last one)
         try {
             return segments_.back().smgr->construct<T>(name)(std::forward<Args>(args)...);
@@ -244,7 +244,7 @@ public:
     /// Find a named object by name.  Returns {ptr, count} or {nullptr, 0}.
     template<class T>
     std::pair<T*, std::size_t> find(const char* name) const {
-        std::shared_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         for (const auto& info : segments_) {
             auto res = info.smgr->find<T>(name);
             if (res.first) {
@@ -257,7 +257,7 @@ public:
     /// Destroy a named object by name.  Calls its destructor and frees memory.
     template<class T>
     bool destroy(const char* name) {
-        std::shared_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         for (auto& info : segments_) {
             if (info.smgr->destroy<T>(name)) {
                 return true;
@@ -283,7 +283,7 @@ public:
     }
 
     size_type get_free_memory() const {
-        std::shared_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         size_type total = 0;
         for (const auto& info : segments_)
             total += info.smgr->get_free_memory();
@@ -292,7 +292,7 @@ public:
 
     /// Total capacity (mapped bytes) across all sub-segments.
     size_type get_size() const {
-        std::shared_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         size_type total = 0;
         for (const auto& info : segments_)
             total += info.seg->size;
@@ -301,7 +301,7 @@ public:
 
     /// Number of sub-segments currently in use.
     std::size_t segment_count() const {
-        std::shared_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         return segments_.size();
     }
 
@@ -313,7 +313,7 @@ public:
         size_type new_chunk_size = 0;
         size_type current_file_size = 0;
         {
-            std::shared_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             if (get_free_memory_unlocked() >= min_bytes) return;
             new_chunk_size = std::max(min_bytes,
                 segments_.empty() ? kDefaultSegSize
@@ -324,19 +324,31 @@ public:
         if (anon_) {
             auto seg = sub_segment::create_anon(new_chunk_size);
             if (!seg) throw std::bad_alloc();
-            std::unique_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             add_segment_anon_preallocated(std::move(seg), false);
         } else {
             std::size_t new_file_size = current_file_size + new_chunk_size;
             if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) {
                 throw std::bad_alloc();
             }
-            std::unique_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             // is_creator = false (we just map a chunk, don't create file)
             // initialize_smgr = true (we are growing, so we initialize the new segment manager)
             add_segment_shm(current_file_size, new_chunk_size, false, false, true);
             update_segment_table();
         }
+    }
+
+    template <typename T>
+#if defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+__attribute__((no_sanitize("thread")))
+#  endif
+#elif defined(__SANITIZE_THREAD__)
+__attribute__((no_sanitize("thread")))
+#endif
+    static size_type tsan_safe_get_free_memory(const T* seg) {
+        return seg->smgr->get_free_memory();
     }
 
     void grow_background() noexcept {
@@ -346,10 +358,10 @@ public:
         size_type new_chunk_size = 0;
         size_type current_file_size = 0;
         {
-            std::shared_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             if (segments_.empty()) return;
             auto& last_seg = segments_.back();
-            if (last_seg.smgr->get_free_memory() >= (last_seg.seg->size / 2)) return;
+            if (tsan_safe_get_free_memory(&last_seg) >= (last_seg.seg->size / 2)) return;
             new_chunk_size = std::max(kMinSegmentSize, last_seg.seg->size * kGrowMultiplier);
             new_chunk_size = detail::align_up(new_chunk_size, detail::page_size());
             current_file_size = get_size_unlocked();
@@ -358,13 +370,17 @@ public:
         if (anon_) {
             auto seg = sub_segment::create_anon(new_chunk_size);
             if (!seg) return;
-            std::unique_lock<std::shared_mutex> lk(list_mtx_);
+            std::unique_lock<std::mutex> lk(list_mtx_);
             add_segment_anon_preallocated(std::move(seg), false);
         } else {
             std::size_t new_file_size = current_file_size + new_chunk_size;
-            if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) return;
+            std::printf("Attempting shm_grow %s to %zu\n", shm_root_name_.c_str(), new_file_size);
+            if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) {
+                std::printf("shm_grow failed!\n");
+                return;
+            }
             {
-                std::unique_lock<std::shared_mutex> lk(list_mtx_);
+                std::unique_lock<std::mutex> lk(list_mtx_);
                 if (current_file_size == get_size_unlocked()) {
                     add_segment_shm(current_file_size, new_chunk_size, false, false, true);
                     update_segment_table();
@@ -484,6 +500,7 @@ private:
     }
 
     segment_manager* smgr_for(sub_segment* seg) const noexcept {
+        std::unique_lock<std::mutex> lk(list_mtx_);
         for (const auto& info : segments_)
             if (info.seg.get() == seg) return info.smgr;
         return nullptr;
@@ -593,7 +610,7 @@ public:
     bool lazy_discover_growth(std::size_t required_file_offset) {
         if (anon_) return false; // anonymous memory cannot grow lazily
 
-        std::unique_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         
         // Ensure we haven't already mapped it while waiting for the lock
         std::size_t current_mapped_size = 0;
@@ -620,7 +637,7 @@ public:
     }
 
     sub_segment* find_segment_by_file_offset(std::size_t file_offset) const {
-        std::shared_lock<std::shared_mutex> lk(list_mtx_);
+        std::unique_lock<std::mutex> lk(list_mtx_);
         for (const auto& info : segments_) {
             if (file_offset >= info.seg->file_offset && 
                 file_offset < info.seg->file_offset + info.seg->size) {
@@ -636,7 +653,7 @@ public:
     bool                   anon_;
     std::string            shm_root_name_;
     std::mutex grow_mtx_;
-    mutable std::shared_mutex list_mtx_;
+    mutable std::mutex list_mtx_;
     std::vector<seg_info>  segments_;
 
     // We no longer use a process-local map for named objects,
