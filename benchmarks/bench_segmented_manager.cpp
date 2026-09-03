@@ -17,6 +17,11 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
+
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include "segmented_interprocess/segmented_managed_memory.hpp"

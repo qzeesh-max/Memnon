@@ -43,6 +43,9 @@ target_link_libraries(segmented_interprocess INTERFACE
     Boost::headers
     Threads::Threads
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(segmented_interprocess INTERFACE rt)
+endif()
 
 target_compile_options(segmented_interprocess INTERFACE
     $<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:
