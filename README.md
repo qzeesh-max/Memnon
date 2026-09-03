@@ -33,6 +33,10 @@ This project provides a robust, scalable, lock-free approach to managing segment
 7. **Background Prefetch Worker**
    - A background thread proactively manages sub-segment growth by tracking memory usage. When available memory in the active segment drops below 50%, it non-blockingly pre-allocates and maps the next sub-segment, masking POSIX I/O latency from the hot path.
 
+8. **Custom User Paths & Cross-Platform Support**
+   - The framework fully supports user-defined absolute and relative file paths for backing shared memory segments (e.g., `./my_local_shm` or `/mnt/ramdisk/shm`).
+   - On Linux, it leverages standard `open()`/`unlink()` to bypass strict `/dev/shm` naming restrictions, while gracefully falling back to standard `shm_open()` on macOS where required.
+
 ## Windows Support & Sparse File Architecture
 
 Memnon provides full native support for Windows (MSVC / MSYS2) by leveraging advanced NTFS sparse files. On Windows, a standard `truncate()` on a mapped file is strictly forbidden by the OS lock manager, which blocks continuous file growth while processes are attached. 

@@ -30,17 +30,16 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <stdexcept>
+#include <chrono>
+#include <thread>
+#include <filesystem>
 #include <vector>
 #include <string>
 
 #include "segmented_interprocess/segmented_managed_memory.hpp"
 
 using namespace segmented_interprocess;
-
-
-#include <thread>
-#include <chrono>
 
 
 // ============================================================================
@@ -283,16 +282,13 @@ static void test_raw_alloc_stress() {
     std::printf("PASS: test_raw_alloc_stress (%d allocs)\n", kN);
 }
 
-
-#include <thread>
-#include <chrono>
-
 // ============================================================================
 // Test 9: background prefetch worker
 // ============================================================================
 static void test_background_prefetch() {
-    segmented_interprocess::detail::shm_remove("test_background_prefetch");
-    segmented_managed_memory mem("test_background_prefetch", create_only, kDefaultSegSize);
+    std::string path = (std::filesystem::temp_directory_path() / "test_background_prefetch_shm").string();
+    segmented_interprocess::detail::shm_remove(path.c_str());
+    segmented_managed_memory mem(path, create_only, kDefaultSegSize);
 
     std::size_t initial_segs = mem.segment_count();
     CHECK_EQ(initial_segs, std::size_t(1));
@@ -318,7 +314,7 @@ static void test_background_prefetch() {
     mem.deallocate(p);
 
     std::printf("PASS: test_background_prefetch (asynchronously pre-allocated segment)\n");
-    segmented_interprocess::detail::shm_remove("test_background_prefetch");
+    segmented_interprocess::detail::shm_remove(path.c_str());
 }
 
 // ============================================================================

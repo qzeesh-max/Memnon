@@ -167,7 +167,14 @@ inline void mmap_free(void* p, std::size_t size) noexcept {
 
 #if defined(_WIN32)
 
+inline bool is_custom_path(const char* name) {
+    return std::strchr(name, '/') != nullptr || std::strchr(name, '\\') != nullptr;
+}
+
 inline std::string get_shm_path(const char* name) {
+    if (is_custom_path(name)) {
+        return std::string(name);
+    }
     char temp_path[MAX_PATH];
     DWORD res = GetTempPathA(MAX_PATH, temp_path);
     if (res == 0 || res > MAX_PATH) {
@@ -288,19 +295,44 @@ inline void shm_close(void* base, std::size_t size) noexcept {
 
 #else
 
-#ifdef __APPLE__
+inline bool is_custom_path(const char* name) {
+    const char* first_slash = std::strchr(name, '/');
+    if (!first_slash) return false;
+    // If it's something like "/my_shm", it's a bare name for shm_open.
+    // If it's "foo/bar" or "/tmp/my_shm", it's a custom path.
+    return (first_slash != name) || (std::strchr(first_slash + 1, '/') != nullptr);
+}
+
 inline std::string get_platform_shm_path(const char* name) {
+    if (is_custom_path(name)) {
+        return std::string(name);
+    }
+#ifdef __APPLE__
     std::string s = "/tmp/memnon_shm_";
+#else
+    std::string s = "/dev/shm/";
+#endif
     if (name[0] == '/') s += (name + 1);
     else s += name;
     return s;
 }
-#define PLATFORM_SHM_OPEN(name, oflag, mode) ::open(get_platform_shm_path(name).c_str(), oflag, mode)
-#define PLATFORM_SHM_UNLINK(name) ::unlink(get_platform_shm_path(name).c_str())
-#else
-#define PLATFORM_SHM_OPEN(name, oflag, mode) ::shm_open(name, oflag, mode)
-#define PLATFORM_SHM_UNLINK(name) ::shm_unlink(name)
-#endif
+
+inline int platform_shm_open(const char* name, int oflag, mode_t mode) {
+    if (is_custom_path(name)) {
+        return ::open(name, oflag, mode);
+    }
+    return ::open(get_platform_shm_path(name).c_str(), oflag, mode);
+}
+
+inline int platform_shm_unlink(const char* name) {
+    if (is_custom_path(name)) {
+        return ::unlink(name);
+    }
+    return ::unlink(get_platform_shm_path(name).c_str());
+}
+
+#define PLATFORM_SHM_OPEN(name, oflag, mode) platform_shm_open(name, oflag, mode)
+#define PLATFORM_SHM_UNLINK(name) platform_shm_unlink(name)
 
 /// Create a new named SHM object of `size` bytes and mmap it.
 /// The name must start with '/'.  On success, *out_fd is the open fd (caller
