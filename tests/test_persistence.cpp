@@ -3,8 +3,6 @@
 #include <cassert>
 #include <vector>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <iostream>
 
 #include <segmented_interprocess/segmented_managed_memory.hpp>
@@ -39,81 +37,77 @@ struct NewDataArray {
 
 const char* SHM_NAME = "test_persistence_shm";
 
-static void test_cross_process_lifecycle() {
-    // Phase 1: Creator Process
-    // Creates the memory, allocates objects, causes growth
-    pid_t pid1 = fork();
-    CHECK(pid1 >= 0);
+static void child1() {
+    // Child 1 (Creator)
+    segmented_interprocess::detail::shm_remove(SHM_NAME);
+    segmented_managed_memory mem(SHM_NAME, create_only, 1024 * 64); // 64 KB
 
-    if (pid1 == 0) {
-        // Child 1 (Creator)
-        boost::interprocess::shared_memory_object::remove(SHM_NAME);
-        segmented_managed_memory mem(SHM_NAME, create_only, 1024 * 64); // 64 KB
-
-        auto* wrapper = mem.construct<MyDataArray>("my_arr");
-        for (int i = 0; i < 100; ++i) {
-            wrapper->arr[i].id = i;
-            wrapper->arr[i].value = i * 3.14;
-        }
-
-        // Allocate raw objects to cause a segment growth
-        std::vector<void*> raw_allocs;
-        for (int i = 0; i < 50; ++i) {
-            raw_allocs.push_back(mem.allocate(4096)); // ~200 KB total, forces multiple growths
-        }
-
-        mem.construct<int>("magic_val", 42);
-        
-        _exit(0);
-    }
-    
-    int status1 = 0;
-    waitpid(pid1, &status1, 0);
-    CHECK(WIFEXITED(status1));
-    CHECK_EQ(WEXITSTATUS(status1), 0);
-
-    // Phase 2: Opener Process (Different Process)
-    // Opens, verifies, modifies, deallocates, allocates
-    pid_t pid2 = fork();
-    CHECK(pid2 >= 0);
-
-    if (pid2 == 0) {
-        // Child 2 (Opener)
-        segmented_managed_memory mem(SHM_NAME, open_only);
-
-        // Verify "my_arr"
-        auto [wrapper, count] = mem.find<MyDataArray>("my_arr");
-        if (!wrapper) _exit(1);
-        if (count != 1) _exit(2);
-
-        for (int i = 0; i < 100; ++i) {
-            if (wrapper->arr[i].id != i) _exit(3);
-            if (wrapper->arr[i].value != i * 3.14) _exit(4);
-        }
-
-        // Verify "magic_val"
-        auto [val, vcount] = mem.find<int>("magic_val");
-        if (!val || vcount != 1 || *val != 42) _exit(5);
-
-        // Modify
-        *val = 99;
-
-        // Deallocate "my_arr"
-        mem.destroy<MyDataArray>("my_arr");
-
-        // Allocate a new object that triggers another growth
-        auto* new_wrapper = mem.construct<NewDataArray>("new_arr");
-        for (int i = 0; i < 5000; ++i) {
-            new_wrapper->arr[i].id = i + 1000;
-        }
-
-        _exit(0);
+    auto* wrapper = mem.construct<MyDataArray>("my_arr");
+    for (int i = 0; i < 100; ++i) {
+        wrapper->arr[i].id = i;
+        wrapper->arr[i].value = i * 3.14;
     }
 
-    int status2 = 0;
-    waitpid(pid2, &status2, 0);
-    CHECK(WIFEXITED(status2));
-    CHECK_EQ(WEXITSTATUS(status2), 0);
+    // Allocate raw objects to cause a segment growth
+    std::vector<void*> raw_allocs;
+    for (int i = 0; i < 50; ++i) {
+        raw_allocs.push_back(mem.allocate(4096)); // ~200 KB total, forces multiple growths
+    }
+
+    mem.construct<int>("magic_val", 42);
+    std::exit(0);
+}
+
+static void child2() {
+    // Child 2 (Opener)
+    segmented_managed_memory mem(SHM_NAME, open_only);
+
+    // Verify "my_arr"
+    auto [wrapper, count] = mem.find<MyDataArray>("my_arr");
+    if (!wrapper) std::exit(1);
+    if (count != 1) std::exit(2);
+
+    for (int i = 0; i < 100; ++i) {
+        if (wrapper->arr[i].id != i) std::exit(3);
+        if (wrapper->arr[i].value != i * 3.14) std::exit(4);
+    }
+
+    // Verify "magic_val"
+    auto [val, vcount] = mem.find<int>("magic_val");
+    if (!val || vcount != 1 || *val != 42) std::exit(5);
+
+    // Modify
+    *val = 99;
+
+    // Deallocate "my_arr"
+    mem.destroy<MyDataArray>("my_arr");
+
+    // Allocate a new object that triggers another growth
+    auto* new_wrapper = mem.construct<NewDataArray>("new_arr");
+    for (int i = 0; i < 5000; ++i) {
+        new_wrapper->arr[i].id = i + 1000;
+    }
+
+    std::exit(0);
+}
+
+static void test_cross_process_lifecycle(const char* argv0) {
+    // Quote argv0 in case it contains spaces
+    std::string cmd1 = std::string("\"\"") + argv0 + "\" --child1\"";
+#ifndef _WIN32
+    cmd1 = std::string("\"") + argv0 + "\" --child1";
+#endif
+
+    int status1 = std::system(cmd1.c_str());
+    CHECK_EQ(status1, 0);
+
+    std::string cmd2 = std::string("\"\"") + argv0 + "\" --child2\"";
+#ifndef _WIN32
+    cmd2 = std::string("\"") + argv0 + "\" --child2";
+#endif
+
+    int status2 = std::system(cmd2.c_str());
+    CHECK_EQ(status2, 0);
 
     // Phase 3: Same process (parent) re-opens to verify child 2's work
     {
@@ -152,13 +146,24 @@ static void test_cross_process_lifecycle() {
         CHECK_NULL(new_wrapper);
     }
 
-    boost::interprocess::shared_memory_object::remove(SHM_NAME);
+    segmented_interprocess::detail::shm_remove(SHM_NAME);
     std::printf("PASS: test_cross_process_lifecycle\n");
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc == 2) {
+        std::string arg = argv[1];
+        if (arg == "--child1") {
+            child1();
+            return 0;
+        } else if (arg == "--child2") {
+            child2();
+            return 0;
+        }
+    }
+
     std::printf("=== test_persistence ===\n");
-    test_cross_process_lifecycle();
+    test_cross_process_lifecycle(argv[0]);
     std::printf("=== ALL test_persistence PASSED ===\n");
     return 0;
 }

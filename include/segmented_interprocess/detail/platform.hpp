@@ -29,16 +29,18 @@
 #include <cstddef>
 #include <cstring>   // memset
 #include <cerrno>
+#include <string>
 
 #if defined(_WIN32)
-#  error "Windows support not yet implemented"
-#endif
-
+#include <windows.h>
+#include <boost/interprocess/shared_memory_object.hpp>
+#else
 // POSIX headers
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 
 namespace segmented_interprocess {
 namespace detail {
@@ -46,7 +48,9 @@ namespace detail {
 // ---------------------------------------------------------------------------
 // mmap flag portability
 // ---------------------------------------------------------------------------
-#if defined(__APPLE__)
+#if defined(_WIN32)
+inline constexpr int kMapAnon = 0;
+#elif defined(__APPLE__)
 inline constexpr int kMapAnon = MAP_ANON;
 #else
 inline constexpr int kMapAnon = MAP_ANONYMOUS;
@@ -56,12 +60,24 @@ inline constexpr int kMapAnon = MAP_ANONYMOUS;
 // Page size / page shift
 // ---------------------------------------------------------------------------
 
+#if defined(_WIN32)
+/// Returns the system page size in bytes (cached on first call).
+inline std::size_t page_size() noexcept {
+    static const std::size_t kSz = [] {
+        SYSTEM_INFO info;
+        GetSystemInfo(&info);
+        return static_cast<std::size_t>(info.dwAllocationGranularity);
+    }();
+    return kSz;
+}
+#else
 /// Returns the system page size in bytes (cached on first call).
 inline std::size_t page_size() noexcept {
     static const std::size_t kSz =
         static_cast<std::size_t>(::getpagesize());
     return kSz;
 }
+#endif
 
 /// Returns log2(page_size()), i.e. the page shift (cached on first call).
 inline unsigned page_shift() noexcept {
@@ -116,6 +132,18 @@ inline uintptr_t ptr_to_vaddr(const T* p) noexcept {
 // Anonymous private memory (single-process segments)
 // ---------------------------------------------------------------------------
 
+#if defined(_WIN32)
+/// Allocate `size` bytes of zero-filled, readable/writable anonymous memory.
+/// Returns nullptr on failure; does NOT throw.
+inline void* mmap_alloc(std::size_t size) noexcept {
+    return VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+/// Release a mapping previously obtained from mmap_alloc().
+inline void mmap_free(void* p, std::size_t size) noexcept {
+    if (p) VirtualFree(p, 0, MEM_RELEASE);
+}
+#else
 /// Allocate `size` bytes of zero-filled, readable/writable anonymous memory.
 /// Returns nullptr on failure; does NOT throw.
 inline void* mmap_alloc(std::size_t size) noexcept {
@@ -131,10 +159,134 @@ inline void mmap_free(void* p, std::size_t size) noexcept {
     if (p && p != MAP_FAILED)
         ::munmap(p, size);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Named shared memory (cross-process segments)
 // ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+
+inline std::string get_shm_path(const char* name) {
+    char temp_path[MAX_PATH];
+    DWORD res = GetTempPathA(MAX_PATH, temp_path);
+    if (res == 0 || res > MAX_PATH) {
+        return std::string("C:\\Memnon_") + name + ".dat";
+    }
+    return std::string(temp_path) + "Memnon_" + name + ".dat";
+}
+
+inline void* shm_create(const char* name, std::size_t size) noexcept {
+    try {
+        std::string path = get_shm_path(name);
+        HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            return nullptr;
+        }
+
+        DWORD bytesReturned = 0;
+        DeviceIoControl(hFile, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytesReturned, NULL);
+
+        LARGE_INTEGER liSize;
+        liSize.QuadPart = 1ULL << 40; // 1 TB virtual limit
+        SetFilePointerEx(hFile, liSize, NULL, FILE_BEGIN);
+        SetEndOfFile(hFile);
+
+        HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+        if (!hMap) { CloseHandle(hFile); return nullptr; }
+        
+        void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return p;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+inline void* shm_open_existing(const char* name, std::size_t size) noexcept {
+    try {
+        std::string path = get_shm_path(name);
+        HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return nullptr;
+
+        HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+        if (!hMap) { CloseHandle(hFile); return nullptr; }
+        
+        void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return p;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+inline void* shm_map_chunk(const char* name, std::size_t size, std::size_t file_offset) noexcept {
+    try {
+        std::string path = get_shm_path(name);
+        HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            return nullptr;
+        }
+
+        HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+        if (!hMap) { CloseHandle(hFile); return nullptr; }
+        
+        DWORD offset_high = static_cast<DWORD>(file_offset >> 32);
+        DWORD offset_low = static_cast<DWORD>(file_offset & 0xFFFFFFFF);
+        void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, offset_high, offset_low, size);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return p;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+inline std::size_t shm_get_size(const char* name) noexcept {
+    try {
+        // For sparse file implementation, the file is virtually 1 TB.
+        // The segment manager manages the physical allocated boundaries.
+        // We just return 1 TB here, as the virtual file size is practically unbounded.
+        return 1ULL << 40;
+    } catch (...) {
+        return 0;
+    }
+}
+
+inline bool shm_grow(const char* name, std::size_t new_size) noexcept {
+    // Sparse files are already virtually 1 TB. No physical truncation is needed.
+    // The OS allocates pages on-demand.
+    return true;
+}
+
+inline void shm_destroy(void* base, std::size_t size, const char* name) noexcept {
+    if (base) UnmapViewOfFile(base);
+    if (name && name[0] != '\0') {
+        std::string path = get_shm_path(name);
+        DeleteFileA(path.c_str());
+    }
+}
+
+inline void shm_remove(const char* name) noexcept {
+    if (name && name[0] != '\0') {
+        std::string path = get_shm_path(name);
+        DeleteFileA(path.c_str());
+    }
+}
+
+inline void shm_close(void* base, std::size_t size) noexcept {
+    if (base) UnmapViewOfFile(base);
+}
+
+#else
 
 /// Create a new named SHM object of `size` bytes and mmap it.
 /// The name must start with '/'.  On success, *out_fd is the open fd (caller
@@ -218,12 +370,13 @@ inline bool shm_grow(const char* name, std::size_t new_size) noexcept {
 }
 
 /// Unmap and unlink a named SHM region.
-inline void shm_destroy(void* base, std::size_t size,
-                         const char* name) noexcept {
-    if (base && base != MAP_FAILED)
-        ::munmap(base, size);
-    if (name && name[0] != '\0')
-        ::shm_unlink(name);
+inline void shm_destroy(void* base, std::size_t size, const char* name) noexcept {
+    if (base && base != MAP_FAILED) ::munmap(base, size);
+    if (name && name[0] != '\0')    ::shm_unlink(name);
+}
+
+inline void shm_remove(const char* name) noexcept {
+    if (name && name[0] != '\0')    ::shm_unlink(name);
 }
 
 /// Unmap a named SHM region (without unlinking — for processes that just
@@ -232,6 +385,8 @@ inline void shm_close(void* base, std::size_t size) noexcept {
     if (base && base != MAP_FAILED)
         ::munmap(base, size);
 }
+
+#endif
 
 } // namespace detail
 } // namespace segmented_interprocess

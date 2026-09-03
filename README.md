@@ -33,11 +33,17 @@ This project provides a robust, scalable, lock-free approach to managing segment
 7. **Background Prefetch Worker**
    - A background thread proactively manages sub-segment growth by tracking memory usage. When available memory in the active segment drops below 50%, it non-blockingly pre-allocates and maps the next sub-segment, masking POSIX I/O latency from the hot path.
 
+## Windows Support & Sparse File Architecture
+
+Memnon provides full native support for Windows (MSVC / MSYS2) by leveraging advanced NTFS sparse files. On Windows, a standard `truncate()` on a mapped file is strictly forbidden by the OS lock manager, which blocks continuous file growth while processes are attached. 
+
+To solve this, Memnon uses `FSCTL_SET_SPARSE` via `DeviceIoControl` to allocate an initial `1 TB` virtual file boundary for the segment manager, without actually reserving disk clusters. As the application maps new `MapViewOfFile` chunks and dirties pages inside that virtual range, the operating system transparently commits physical disk space on the fly. This provides wait-free segment growth while fully bypassing Windows truncation deadlocks.
+
 ## Building and Testing
 
 ### Prerequisites / Dependencies
 - **CMake 3.10+**: For configuring and building the project.
-- **A C++17 compatible compiler**: Such as GCC, Clang, or Apple Clang.
+- **A C++17 compatible compiler**: Such as MSVC (Visual Studio 2019+), GCC, Clang, or Apple Clang.
 - **Boost C++ Libraries**: Used for the internal intrusive free-lists, robust named object tracking, and interprocess synchronization primitives.
 - **Google Benchmark**: Used for the performance benchmark suite (automatically fetched via CMake's `FetchContent`).
 - **Google Test (GTest)**: Used for the correctness test suite (automatically fetched via CMake's `FetchContent`).
@@ -45,29 +51,54 @@ This project provides a robust, scalable, lock-free approach to managing segment
 *For full licensing details of the third-party dependencies, please see the `CREDITS.md` file.*
 
 ### Build Instructions
+
+**macOS / Linux / MSYS2:**
 ```sh
 ./build.sh
+```
+
+**Windows (MSVC Developer Command Prompt):**
+```bat
+build.bat
 ```
 
 ### Running Tests
 The project features a comprehensive test suite covering basic memory allocations, recursive growths, multi-threading with contention, cross-manager bounds checking, multi-process lazy discovery, and background prefetcher behavior.
 
+**macOS / Linux / MSYS2:**
 ```sh
 ./run_tests.sh
+```
+
+**Windows (MSVC):**
+```bat
+run_tests.bat
 ```
 
 ### Running Benchmarks
 Google Benchmark is automatically fetched via `FetchContent` in CMake.
 
+**macOS / Linux / MSYS2:**
 ```sh
 ./run_benchmarks.sh
+```
+
+**Windows (MSVC):**
+```bat
+run_benchmarks.bat
 ```
 
 ### Sanitizers
 A script is provided to automatically compile and run the full test suite under AddressSanitizer (ASAN), UndefinedBehaviorSanitizer (UBSAN), and ThreadSanitizer (TSAN) to guarantee memory correctness and data-race freedom.
 
+**macOS / Linux / MSYS2:**
 ```sh
 ./run_sanitizers.sh
+```
+
+**Windows (MSVC):**
+```bat
+run_sanitizers.bat
 ```
 
 ## Performance

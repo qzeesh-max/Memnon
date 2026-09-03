@@ -16,8 +16,7 @@
 #include <benchmark/benchmark.h>
 #include <thread>
 #include <vector>
-#include <unistd.h>
-#include <sys/wait.h>
+
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include "segmented_interprocess/segmented_managed_memory.hpp"
@@ -215,6 +214,7 @@ BENCHMARK(BM_Boost_MultiThread_Traversal)->Threads(1)->Threads(2)->Threads(4)->T
 // ---------------------------------------------------------------------------
 // 5. Multi-Process Traversal (fork + exec equivalent via fork)
 // ---------------------------------------------------------------------------
+#ifndef _WIN32
 static void BM_SegMgr_MultiProcess_Traversal(benchmark::State& state) {
     for (auto _ : state) {
         state.PauseTiming();
@@ -298,3 +298,5 @@ static void BM_Boost_MultiProcess_Traversal(benchmark::State& state) {
     boost::interprocess::shared_memory_object::remove("bench_boost_multiproc");
 }
 BENCHMARK(BM_Boost_MultiProcess_Traversal);
+#endif
+

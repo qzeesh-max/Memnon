@@ -40,8 +40,8 @@ struct Node {
 void test_cross_manager_exception() {
     try {
         std::cout << "Removing old SHM files\n" << std::flush;
-        boost::interprocess::shared_memory_object::remove("test_cross_mgr_1");
-        boost::interprocess::shared_memory_object::remove("test_cross_mgr_2");
+        segmented_interprocess::detail::shm_remove("test_cross_mgr_1");
+        segmented_interprocess::detail::shm_remove("test_cross_mgr_2");
         std::cout << "Removed old SHM files\n" << std::flush;
         
         {
@@ -81,8 +81,8 @@ void test_cross_manager_exception() {
             assert(stack_node.next.get() == n1);
         }
         
-        boost::interprocess::shared_memory_object::remove("test_cross_mgr_1");
-        boost::interprocess::shared_memory_object::remove("test_cross_mgr_2");
+        segmented_interprocess::detail::shm_remove("test_cross_mgr_1");
+        segmented_interprocess::detail::shm_remove("test_cross_mgr_2");
         std::cout << "test_cross_manager_exception finished\n";
     } catch (const std::exception& e) {
         std::cout << "test_cross_manager_exception failed with exception: " << e.what() << "\n";
@@ -90,7 +90,7 @@ void test_cross_manager_exception() {
 }
 
 void test_multiprocess_lazy_discovery() {
-    boost::interprocess::shared_memory_object::remove("test_lazy_discovery");
+    segmented_interprocess::detail::shm_remove("test_lazy_discovery");
     
     {
         segmented_managed_memory mgr1("test_lazy_discovery", segmented_interprocess::create_only, 65536);
@@ -127,12 +127,12 @@ void test_multiprocess_lazy_discovery() {
         assert(count == 5000);
     }
     
-    boost::interprocess::shared_memory_object::remove("test_lazy_discovery");
+    segmented_interprocess::detail::shm_remove("test_lazy_discovery");
     std::cout << "test_multiprocess_lazy_discovery finished\n";
 }
 
 void test_concurrent_growth() {
-    boost::interprocess::shared_memory_object::remove("test_concurrent_growth");
+    segmented_interprocess::detail::shm_remove("test_concurrent_growth");
     
     {
         segmented_managed_memory mgr("test_concurrent_growth", segmented_interprocess::create_only, 65536);
@@ -164,7 +164,7 @@ void test_concurrent_growth() {
         assert(mgr.get_size() > 65536);
     }
     
-    boost::interprocess::shared_memory_object::remove("test_concurrent_growth");
+    segmented_interprocess::detail::shm_remove("test_concurrent_growth");
     std::cout << "test_concurrent_growth finished\n";
 }
 

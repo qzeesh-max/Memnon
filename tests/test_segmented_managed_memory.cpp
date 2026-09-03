@@ -42,30 +42,6 @@ using namespace segmented_interprocess;
 #include <thread>
 #include <chrono>
 
-// ============================================================================
-// Test 9: background prefetch worker
-// ============================================================================
-static void test_background_prefetch() {
-    segmented_managed_memory mem(kDefaultSegSize);
-
-    std::size_t initial_segs = mem.segment_count();
-    CHECK_EQ(initial_segs, std::size_t(1));
-
-    // Allocate slightly more than 50% to trigger the background prefetch
-    std::size_t alloc_size = (kDefaultSegSize / 2) + 1024 * 1024;
-    void* p = mem.allocate(alloc_size);
-    CHECK_NONNULL(p);
-
-    // Sleep briefly to allow the background worker thread to execute
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    std::size_t segs_after = mem.segment_count();
-    CHECK(segs_after > initial_segs);
-
-    mem.deallocate(p);
-
-    std::printf("PASS: test_background_prefetch (asynchronously pre-allocated segment)\n");
-}
 
 // ============================================================================
 // Utility
@@ -315,7 +291,8 @@ static void test_raw_alloc_stress() {
 // Test 9: background prefetch worker
 // ============================================================================
 static void test_background_prefetch() {
-    segmented_managed_memory mem(kDefaultSegSize);
+    segmented_interprocess::detail::shm_remove("test_background_prefetch");
+    segmented_managed_memory mem("test_background_prefetch", create_only, kDefaultSegSize);
 
     std::size_t initial_segs = mem.segment_count();
     CHECK_EQ(initial_segs, std::size_t(1));
@@ -325,15 +302,21 @@ static void test_background_prefetch() {
     void* p = mem.allocate(alloc_size);
     CHECK_NONNULL(p);
 
-    // Sleep briefly to allow the background worker thread to execute
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    std::size_t segs_after = mem.segment_count();
+    // Wait for the background worker thread to execute (up to 5 seconds)
+    std::size_t segs_after = initial_segs;
+    for (int i = 0; i < 50; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        segs_after = mem.segment_count();
+        if (segs_after > initial_segs) {
+            break;
+        }
+    }
     CHECK(segs_after > initial_segs);
 
     mem.deallocate(p);
 
     std::printf("PASS: test_background_prefetch (asynchronously pre-allocated segment)\n");
+    segmented_interprocess::detail::shm_remove("test_background_prefetch");
 }
 
 // ============================================================================

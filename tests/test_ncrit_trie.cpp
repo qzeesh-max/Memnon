@@ -66,10 +66,6 @@ static void check(bool cond, const char* msg) {
 #define CHECK_NULL(a)  check((a)==nullptr, #a " == nullptr")
 #define CHECK_NONNULL(a) check((a)!=nullptr, #a " != nullptr")
 
-static uintptr_t page_base(uintptr_t addr) {
-    const std::size_t ps = detail::page_size();
-    return (addr / ps) * ps;
-}
 
 // ============================================================================
 // Test 1: basic single-page insert and lookup
@@ -326,7 +322,7 @@ static void bench_lookup() {
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < kIter; ++i) {
         // Vary address to stress-test cache + trie paths
-        uintptr_t addr = base + (static_cast<uintptr_t>(i * 16384) % sz);
+        uintptr_t addr = base + ((static_cast<uintptr_t>(i) * 16384) % sz);
         volatile dummy_seg* r = trie.lookup(addr);
         (void)r;
     }

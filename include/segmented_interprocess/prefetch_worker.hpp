@@ -60,6 +60,7 @@ private:
     ~prefetch_worker() {
         if (thread_.joinable()) {
             stop_.store(true, std::memory_order_release);
+            { std::lock_guard<std::mutex> lk(sleep_mtx_); }
             cv_.notify_one();
             thread_.join();
         }

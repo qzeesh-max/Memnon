@@ -256,7 +256,7 @@ static void test_offset_ptr_under_grow() {
         while (!ready.load(std::memory_order_acquire)) {}
         while (!stop.load(std::memory_order_acquire)) {
             int val = *stack_ptr;
-            if (val != 0xCAFEBABE)
+            if (static_cast<unsigned int>(val) != 0xCAFEBABE)
                 errors.fetch_add(1, std::memory_order_relaxed);
         }
     });

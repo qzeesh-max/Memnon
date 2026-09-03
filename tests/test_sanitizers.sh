@@ -34,7 +34,7 @@ run_sanitizer() {
     cd "${build_dir}"
 
     cmake -DCMAKE_CXX_FLAGS="${san_flags}" -DCMAKE_BUILD_TYPE=Debug ..
-    make -j$(sysctl -n hw.ncpu || nproc)
+    make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 
     echo "--> Running tests"
     ./tests/test_ncrit_trie

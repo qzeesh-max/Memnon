@@ -332,13 +332,14 @@ public:
                 throw std::bad_alloc();
             }
             std::unique_lock<std::shared_mutex> lk(list_mtx_);
-            add_segment_shm(current_file_size, new_chunk_size, false, false);
+            // is_creator = false (we just map a chunk, don't create file)
+            // initialize_smgr = true (we are growing, so we initialize the new segment manager)
+            add_segment_shm(current_file_size, new_chunk_size, false, false, true);
             update_segment_table();
         }
     }
 
     void grow_background() noexcept {
-        if (anon_) return;
         std::unique_lock<std::mutex> glk(grow_mtx_, std::try_to_lock);
         if (!glk.owns_lock()) return;
 
@@ -353,13 +354,21 @@ public:
             new_chunk_size = detail::align_up(new_chunk_size, detail::page_size());
             current_file_size = get_size_unlocked();
         }
-        std::size_t new_file_size = current_file_size + new_chunk_size;
-        if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) return;
-        {
+
+        if (anon_) {
+            auto seg = sub_segment::create_anon(new_chunk_size);
+            if (!seg) return;
             std::unique_lock<std::shared_mutex> lk(list_mtx_);
-            if (current_file_size == get_size_unlocked()) {
-                add_segment_shm(current_file_size, new_chunk_size, false, false);
-                update_segment_table();
+            add_segment_anon_preallocated(std::move(seg), false);
+        } else {
+            std::size_t new_file_size = current_file_size + new_chunk_size;
+            if (!detail::shm_grow(shm_root_name_.c_str(), new_file_size)) return;
+            {
+                std::unique_lock<std::shared_mutex> lk(list_mtx_);
+                if (current_file_size == get_size_unlocked()) {
+                    add_segment_shm(current_file_size, new_chunk_size, false, false, true);
+                    update_segment_table();
+                }
             }
         }
     }
@@ -431,10 +440,11 @@ private:
     }
 
     void add_segment_shm(size_type file_offset, size_type size,
-                          bool is_primary, bool is_creator) {
+                          bool is_primary, bool is_creator, bool initialize_smgr = false) {
         std::unique_ptr<sub_segment> seg;
         if (is_creator) {
             seg = sub_segment::create_shm(shm_root_name_.c_str(), size);
+            initialize_smgr = true; // Creator always initializes
         } else {
             seg = sub_segment::open_shm_chunk(shm_root_name_.c_str(), size, file_offset);
         }
@@ -463,7 +473,7 @@ private:
         segments_.push_back({std::move(seg), nullptr});
 
         segment_manager* smgr = nullptr;
-        if (is_creator) {
+        if (initialize_smgr) {
             smgr = ::new(smgr_base) si_seg_mgr(smgr_size);
         } else {
             // Second process: segment_manager is already in place
@@ -671,6 +681,7 @@ inline void prefetch_worker::hint_growth(segmented_segment_manager* mgr) {
         if (!queue_.empty() && queue_.back() == mgr) return;
         queue_.push(mgr);
     }
+    { std::lock_guard<std::mutex> slk(sleep_mtx_); }
     cv_.notify_one();
 }
 inline void prefetch_worker::worker_loop() {
